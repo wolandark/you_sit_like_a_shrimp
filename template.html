@@ -1,0 +1,278 @@
+<title>Sitting Like a Shrimp</title>
+<style>
+	body {
+		margin: 0;
+		font-family: system-ui, sans-serif;
+		background: #fbeee0;
+		color: #4a3728;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		min-height: 100vh
+	}
+
+	h1 {
+		font-size: 1.4rem;
+		margin: 16px 0 2px;
+		letter-spacing: .02em
+	}
+
+	.hint {
+		font-size: .85rem;
+		opacity: .7;
+		margin: 2px 0 12px;
+		text-align: center;
+		padding: 0 12px
+	}
+
+	.bar {
+		display: flex;
+		gap: 8px;
+		margin-bottom: 12px;
+		flex-wrap: wrap;
+		justify-content: center;
+		align-items: center
+	}
+
+	button,
+	label.btn {
+		background: #e05a2b;
+		color: #fff;
+		border: none;
+		border-radius: 8px;
+		padding: 8px 14px;
+		font-size: .9rem;
+		cursor: pointer;
+		font-family: inherit
+	}
+
+	button:hover,
+	label.btn:hover {
+		background: #c34a20
+	}
+
+	button.pick {
+		background: #8a6d5a
+	}
+
+	button.pick.on {
+		background: #e05a2b
+	}
+
+	input[type=file] {
+		display: none
+	}
+
+	canvas {
+		width: min(94vw, 900px);
+		height: auto;
+		background: #fff;
+		border-radius: 12px;
+		box-shadow: 0 4px 20px rgba(74, 55, 40, .2);
+		touch-action: none;
+		margin-bottom: 20px
+	}
+
+</style>
+<h1>🦐 Sitting Like a Shrimp</h1>
+<p class="hint">drag the dots to pose the shrimp · drag its body to move it · add a photo, pose, download</p>
+<div class="bar">
+	<button class="pick on" id="pk-photo">Photo shrimp</button>
+	<button class="pick" id="pk-cartoon">Cartoon shrimp</button>
+	<label class="btn">Background photo<input type="file" id="file" accept="image/*"></label>
+	<label>size <input type="range" id="size" min="0.4" max="2.2" step="0.05" value="1"></label>
+	<label>rotate <input type="range" id="rot" min="-180" max="180" step="1" value="0"></label>
+	<button id="reset">Reset pose</button>
+	<button id="save">Download PNG</button>
+</div>
+<div class="bar" style="width:min(94vw,900px)">
+	<input id="cap" type="text" value="me thinking I look nonchalant but this is my posture"
+		style="flex:1;padding:8px 12px;border:1.5px solid #c9a; border-color:#d8c3b0;border-radius:8px;font:inherit;font-size:.95rem;background:#fff;color:#4a3728">
+</div>
+<canvas id="cv" width="900" height="600"></canvas>
+<div id="ov"
+	style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9;flex-direction:column;align-items:center;justify-content:center;gap:12px"
+	onclick="this.style.display='none'">
+	<img id="ovimg" alt="rendered meme" style="max-width:90vw;max-height:80vh;border-radius:8px;background:#fff">
+	<div style="color:#fff;font-size:.9rem;text-align:center;padding:0 16px">right-click / long-press the image → “Save
+		image as…” &nbsp;·&nbsp; click anywhere to close</div>
+</div>
+<script>
+	const DATA = __SHRIMP_DATA__;
+	const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+	let cur = null, P = [], drag = null, bgImg = null, lastSize = 1, lastRot = 0;
+
+	function segsOf(pts, gaps) {
+		const segs = []; let total = 0;
+		for (let i = 0; i < pts.length - 1; i++) {
+			const dx = pts[i + 1][0] - pts[i][0], dy = pts[i + 1][1] - pts[i][1];
+			const len = (gaps && gaps.includes(i)) ? 0 : Math.hypot(dx, dy);
+			segs.push({i, len, ang: Math.atan2(dy, dx), s0: total}); total += len;
+		}
+		return {segs, total};
+	}
+	function sampleAt(pts, meta, s) {
+		let seg = meta.segs[meta.segs.length - 1];
+		for (const g of meta.segs) if (g.len > 0 && s <= g.s0 + g.len) {seg = g; break}
+		const t = seg.len ? Math.max(0, Math.min(1, (s - seg.s0) / seg.len)) : 0;
+		const a = pts[seg.i], b = pts[seg.i + 1], L = (u, v) => u + (v - u) * t;
+		return {x: L(a[0], b[0]), y: L(a[1], b[1]), wt: a.length > 2 ? L(a[2], b[2]) : 20, wb: a.length > 2 ? L(a[3], b[3]) : 20, ang: seg.ang};
+	}
+	function smooth(pts, n) { // Catmull-Rom resample of the joint chain
+		const Q = [];
+		for (let k = 0; k < n; k++) {
+			const u = k / (n - 1) * (pts.length - 1), i = Math.min(pts.length - 2, Math.floor(u)), t = u - i;
+			const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+			const c = j => .5 * (2 * p1[j] + (-p0[j] + p2[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t * t + (-p0[j] + 3 * p1[j] - 3 * p2[j] + p3[j]) * t * t * t);
+			Q.push([c(0), c(1)]);
+		}
+		return Q;
+	}
+	function drawWarp() {
+		const SP = smooth(P, 64), sm = segsOf(cur.pts, cur.gaps), dm = segsOf(SP, null);
+		const ks = dm.total / sm.total, M = 110, step = dm.total / M;
+		const B = []; // slice boundaries; adjacent wedges share edges so no gaps open on bends
+		for (let k = 0; k <= M; k++) {
+			const d = sampleAt(SP, dm, Math.min(k * step, dm.total)), o = sampleAt(cur.pts, sm, Math.min(k / M * sm.total, sm.total));
+			B.push({x: d.x, y: d.y, nx: -Math.sin(d.ang), ny: Math.cos(d.ang), wt: o.wt * ks, wb: o.wb * ks});
+		}
+		for (let k = 0; k < M; k++) {
+			const d = sampleAt(SP, dm, (k + .5) * step), o = sampleAt(cur.pts, sm, (k + .5) / M * sm.total);
+			const a = B[k], b = B[k + 1];
+			ctx.save();
+			ctx.beginPath();
+			ctx.moveTo(a.x - a.nx * a.wt, a.y - a.ny * a.wt);
+			ctx.lineTo(b.x - b.nx * b.wt, b.y - b.ny * b.wt);
+			ctx.lineTo(b.x + b.nx * b.wb, b.y + b.ny * b.wb);
+			ctx.lineTo(a.x + a.nx * a.wb, a.y + a.ny * a.wb);
+			ctx.closePath(); ctx.clip();
+			ctx.translate(d.x, d.y); ctx.rotate(d.ang - o.ang); ctx.scale(ks, ks); ctx.translate(-o.x, -o.y);
+			ctx.drawImage(cur.img, 0, 0);
+			ctx.restore();
+		}
+	}
+	function rr(x, y, w, h, r) {ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill(); ctx.stroke()}
+	function drawScene() { // flat-style chair (left) + desk with laptop (right), like the meme
+		ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.strokeStyle = '#3a3d42'; ctx.lineWidth = 5;
+		ctx.fillStyle = '#9aa0a6'; rr(130, 100, 55, 320, [24, 24, 10, 10]); // chair back: thin vertical bar
+		ctx.fillStyle = '#9aa0a6'; rr(105, 400, 245, 44, 18);           // seat
+		ctx.fillStyle = '#c9ced4'; rr(212, 444, 18, 86, 5);             // post
+		ctx.lineWidth = 9; ctx.beginPath();                          // star base
+		[[125, 575], [190, 598], [252, 598], [317, 575]].forEach(([x, y]) => {ctx.moveTo(221, 528); ctx.lineTo(x, y)});
+		ctx.stroke(); ctx.lineWidth = 5;
+		ctx.fillStyle = '#6d7278';
+		[[125, 580], [190, 603], [252, 603], [317, 580]].forEach(([x, y]) => {ctx.beginPath(); ctx.arc(x, y, 10, 0, 7); ctx.fill(); ctx.stroke()});
+		ctx.fillStyle = '#d4d8dc'; rr(470, 315, 440, 18, 5);            // desk top
+		ctx.fillStyle = '#fff'; rr(545, 333, 345, 250, 4);              // desk leg frame
+		rr(575, 363, 285, 190, 4);
+		ctx.fillStyle = '#7f858c'; rr(635, 303, 190, 14, 4);            // laptop base
+		ctx.fillStyle = '#9aa0a6'; ctx.beginPath(); ctx.moveTo(795, 305); ctx.lineTo(825, 185); ctx.lineTo(845, 192); ctx.lineTo(818, 307); ctx.closePath(); ctx.fill(); ctx.stroke();
+		ctx.fillStyle = '#39c4d4'; ctx.beginPath(); ctx.moveTo(801, 299); ctx.lineTo(827, 196); ctx.lineTo(837, 199); ctx.lineTo(812, 301); ctx.closePath(); ctx.fill();
+	}
+	function drawArm() { // armrest sits in front of the shrimp, like the original meme
+		ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.strokeStyle = '#3a3d42'; ctx.lineWidth = 5;
+		ctx.fillStyle = '#6d7278'; rr(298, 352, 16, 72, 7); rr(252, 336, 96, 18, 9);
+	}
+	function drawCaption() {
+		const t = document.getElementById('cap').value.trim(); if (!t) return;
+		ctx.fillStyle = '#1c1c1e'; ctx.font = '600 34px system-ui,sans-serif'; ctx.textAlign = 'center';
+		const lines = []; let line = '';
+		for (const w of t.split(/\s+/)) {
+			const c = line ? line + ' ' + w : w;
+			if (ctx.measureText(c).width > 780 && line) {lines.push(line); line = w} else line = c
+		}
+		lines.push(line);
+		lines.forEach((l, i) => ctx.fillText(l, 450, 52 + i * 42));
+		ctx.textAlign = 'start';
+	}
+	function draw(handles = true) {
+		ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 900, 600);
+		if (bgImg) {
+			const r = Math.max(900 / bgImg.width, 600 / bgImg.height);
+			ctx.drawImage(bgImg, (900 - bgImg.width * r) / 2, (600 - bgImg.height * r) / 2, bgImg.width * r, bgImg.height * r);
+		} else drawScene();
+		drawCaption();
+		if (cur && cur.img && cur.img.complete) drawWarp();
+		if (!bgImg) drawArm();
+		if (handles) for (const p of P) {
+			ctx.beginPath(); ctx.arc(p[0], p[1], 8, 0, 7);
+			ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.fill();
+			ctx.lineWidth = 1.5; ctx.strokeStyle = '#4a3728'; ctx.stroke();
+		}
+	}
+	function resetPose() {
+		const sm = segsOf(cur.pts, cur.gaps);
+		P = [];
+		for (let i = 0; i < 8; i++) {const q = sampleAt(cur.pts, sm, i / 7 * sm.total); P.push([q.x * 1.25, q.y * 1.25])}
+		const mx = P.reduce((s, p) => s + p[0], 0) / 8, my = Math.max(...P.map(p => p[1]));
+		for (const p of P) {p[0] += 330 - mx; p[1] += 430 - my}
+		lastSize = 1; document.getElementById('size').value = 1;
+		lastRot = 0; document.getElementById('rot').value = 0;
+		draw();
+	}
+	function setShrimp(k) {
+		cur = DATA[k];
+		document.getElementById('pk-photo').classList.toggle('on', k === 'photo');
+		document.getElementById('pk-cartoon').classList.toggle('on', k === 'cartoon');
+		if (!cur.img) {cur.img = new Image(); cur.img.onload = resetPose; cur.img.src = cur.src}
+		else resetPose();
+	}
+	function pt(e) {const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * 900 / r.width, (e.clientY - r.top) * 600 / r.height]}
+	function nearBody(p) {
+		for (let i = 0; i < P.length - 1; i++) {
+			const [ax, ay] = P[i], dx = P[i + 1][0] - ax, dy = P[i + 1][1] - ay, L2 = dx * dx + dy * dy || 1;
+			const t = Math.max(0, Math.min(1, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2));
+			if (Math.hypot(p[0] - ax - dx * t, p[1] - ay - dy * t) < 70) return true;
+		}
+		return false;
+	}
+	cv.addEventListener('pointerdown', e => {
+		const p = pt(e);
+		const hi = P.findIndex(q => Math.hypot(q[0] - p[0], q[1] - p[1]) < 16);
+		if (hi >= 0) drag = {i: hi}; else if (nearBody(p)) drag = {all: 1, last: p};
+		if (drag) cv.setPointerCapture(e.pointerId);
+	});
+	cv.addEventListener('pointermove', e => {
+		if (!drag) return; const p = pt(e);
+		if (drag.all) {for (const q of P) {q[0] += p[0] - drag.last[0]; q[1] += p[1] - drag.last[1]} drag.last = p}
+		else {P[drag.i][0] = p[0]; P[drag.i][1] = p[1]}
+		draw();
+	});
+	cv.addEventListener('pointerup', () => drag = null);
+	document.getElementById('pk-photo').onclick = () => setShrimp('photo');
+	document.getElementById('pk-cartoon').onclick = () => setShrimp('cartoon');
+	document.getElementById('reset').onclick = resetPose;
+	document.getElementById('size').oninput = e => {
+		const f = +e.target.value / lastSize; lastSize = +e.target.value;
+		const mx = P.reduce((s, p) => s + p[0], 0) / P.length, my = P.reduce((s, p) => s + p[1], 0) / P.length;
+		for (const p of P) {p[0] = mx + (p[0] - mx) * f; p[1] = my + (p[1] - my) * f}
+		draw();
+	};
+	document.getElementById('rot').oninput = e => {
+		const a = (+e.target.value - lastRot) * Math.PI / 180; lastRot = +e.target.value;
+		const c = Math.cos(a), s = Math.sin(a);
+		const mx = P.reduce((t, p) => t + p[0], 0) / P.length, my = P.reduce((t, p) => t + p[1], 0) / P.length;
+		for (const p of P) {
+			const x = p[0] - mx, y = p[1] - my;
+			p[0] = mx + x * c - y * s; p[1] = my + x * s + y * c;
+		}
+		draw();
+	};
+	document.getElementById('file').onchange = e => {
+		const f = e.target.files[0]; if (!f) return;
+		const img = new Image();
+		img.onload = () => {bgImg = img; draw()};
+		img.src = URL.createObjectURL(f);
+	};
+	document.getElementById('save').onclick = () => {
+		draw(false);
+		const url = cv.toDataURL('image/png');
+		draw();
+		const a = document.createElement('a'); a.download = 'sitting-like-a-shrimp.png'; a.href = url; a.click();
+		// sandboxed iframes (like the hosted artifact) block downloads — show the image to save manually
+		document.getElementById('ovimg').src = url;
+		document.getElementById('ov').style.display = 'flex';
+	};
+	document.getElementById('cap').oninput = () => draw();
+	setShrimp('photo');
+</script>
